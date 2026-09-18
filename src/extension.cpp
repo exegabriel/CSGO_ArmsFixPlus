@@ -7,7 +7,7 @@
 #define ARMS_SZ_LEN 192
 #define ARMS_FORCEUPDATE_TIMERDURATION 0.02
 
-#define MaxClients gpGlobals->maxClients
+#define MaxClients gamehelpers->GetMaxClients()
 
 #define CALL_FWD(A, B) \
     m_pOnArmsUpdated->PushCell(A); \
