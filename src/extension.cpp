@@ -6,7 +6,6 @@
 
 #define ARMS_SZ_LEN 192
 #define ARMS_FORCEUPDATE_TIMERDURATION 0.02
-
 #define MaxClients 64
 
 #define CALL_FWD(A, B) \
@@ -17,11 +16,11 @@
 IGameEventManager2 *gameevents = NULL;
 IForward *m_pOnArmsUpdated = NULL;
 
-int iSavedActiveWeapon[64 + 1];
-bool bPlayerDisableArmsUpdate[64 + 1];
+int iSavedActiveWeapon[MaxClients + 1];
+bool bPlayerDisableArmsUpdate[MaxClients + 1];
 
 char szPlayerArmsModels_Default[ARMS_SZ_LEN] = "";
-char szPlayerArmsModels[64 + 1][ARMS_SZ_LEN];
+char szPlayerArmsModels[MaxClients + 1][ARMS_SZ_LEN];
 
 int iArmsModelOffset = -1;
 int iActiveWeaponOffset = -1;
@@ -154,7 +153,6 @@ void ArmsFix::FireGameEvent(IGameEvent *pEvent)
         }
         else
         {
-            // Empty means: let the game choose the normal player arms.
             ke::SafeStrcpy(dest, ARMS_SZ_LEN, "");
         }
 
@@ -227,8 +225,34 @@ int ArmsFix::PrecacheModel(
     bool precache
 )
 {
-    // Do not block glove or arms models.
-    // The engine must execute its original precache flow.
+    if (!model)
+    {
+        return META_RESULT_ORIG_RET(int);
+    }
+
+    if (
+        V_strncmp(
+            model,
+            "models/weapons/v_models/arms/glove_har",
+            38
+        ) == 0
+        ||
+        V_strncmp(
+            model,
+            "models/weapons/v_models/arms/glove_f",
+            36
+        ) == 0
+        ||
+        V_strncmp(
+            model,
+            "models/weapons/v_models/arms/ph",
+            31
+        ) == 0
+    )
+    {
+        RETURN_META_VALUE(MRES_SUPERCEDE, 0);
+    }
+
     RETURN_META_VALUE(MRES_IGNORED, 0);
 }
 
@@ -268,7 +292,6 @@ void ArmsFix::SDK_OnUnload()
     gameevents->RemoveListener(this);
 }
 
-// native int AF_Version();
 cell_t sm_AF_Version(
     IPluginContext *pContext,
     const cell_t *params
@@ -277,7 +300,6 @@ cell_t sm_AF_Version(
     return SMEXT_CONF_CUSTOM_VERCODE;
 }
 
-// native void AF_SetDefaultArmsModel(char[] mdl_path);
 cell_t sm_AF_SetDefaultArmsModel(
     IPluginContext *pContext,
     const cell_t *params
@@ -310,7 +332,6 @@ cell_t sm_AF_SetDefaultArmsModel(
     return 1;
 }
 
-// native void AF_ResetDefaultArmsModel();
 cell_t sm_AF_ResetDefaultArmsModel(
     IPluginContext *pContext,
     const cell_t *params
@@ -320,7 +341,6 @@ cell_t sm_AF_ResetDefaultArmsModel(
     return 1;
 }
 
-// native bool AF_HasClientCustomArms(int client);
 cell_t sm_AF_HasClientCustomArms(
     IPluginContext *pContext,
     const cell_t *params
@@ -339,7 +359,6 @@ cell_t sm_AF_HasClientCustomArms(
     return szPlayerArmsModels[iClient][0] != '\0';
 }
 
-// native void AF_SetClientArmsModel(int client, char[] mdl_path);
 cell_t sm_AF_SetClientArmsModel(
     IPluginContext *pContext,
     const cell_t *params
@@ -369,14 +388,12 @@ cell_t sm_AF_SetClientArmsModel(
         );
     }
 
-    /*
-     * The model path comes from eItems/botskins and is specific
-     * to the equipped glove model.
-     */
     engine->PrecacheModel(
         szMdlPath,
         true
     );
+
+    CALL_FWD(iClient, 4);
 
     ke::SafeStrcpy(
         szPlayerArmsModels[iClient],
@@ -384,12 +401,9 @@ cell_t sm_AF_SetClientArmsModel(
         szMdlPath
     );
 
-    CALL_FWD(iClient, 4);
-
     return 1;
 }
 
-// native void AF_RemoveClientArmsModel(int client);
 cell_t sm_AF_RemoveClientArmsModel(
     IPluginContext *pContext,
     const cell_t *params
@@ -410,7 +424,6 @@ cell_t sm_AF_RemoveClientArmsModel(
     return 1;
 }
 
-// native int AF_GetClientArmsModel(int client, char[] dest, int maxlen);
 cell_t sm_AF_GetClientArmsModel(
     IPluginContext *pContext,
     const cell_t *params
@@ -426,9 +439,10 @@ cell_t sm_AF_GetClientArmsModel(
         );
     }
 
-    const char *model = szPlayerArmsModels[iClient][0]
-        ? szPlayerArmsModels[iClient]
-        : szPlayerArmsModels_Default;
+    const char *model =
+        szPlayerArmsModels[iClient][0]
+            ? szPlayerArmsModels[iClient]
+            : szPlayerArmsModels_Default;
 
     size_t len;
 
@@ -442,7 +456,6 @@ cell_t sm_AF_GetClientArmsModel(
     return len;
 }
 
-// native int AF_GetDefaultArmsModel(char[] dest, int maxlen);
 cell_t sm_AF_GetDefaultArmsModel(
     IPluginContext *pContext,
     const cell_t *params
@@ -460,11 +473,18 @@ cell_t sm_AF_GetDefaultArmsModel(
     return len;
 }
 
-static void FrameAction_SetClientActiveWeapon_End(void *pData)
+static void FrameAction_SetClientActiveWeapon_End(
+    void *pData
+)
 {
     int iClient = (uintptr_t)pData;
 
     if (iClient < 1 || iClient > MaxClients)
+    {
+        return;
+    }
+
+    if (iSavedActiveWeapon[iClient] < 64)
     {
         return;
     }
@@ -477,39 +497,20 @@ static void FrameAction_SetClientActiveWeapon_End(void *pData)
         return;
     }
 
-    if (iSavedActiveWeapon[iClient] >= 64)
+    CBaseHandle &hndl =
+        *(CBaseHandle *)(
+            (uint8_t *)pPlayer + iActiveWeaponOffset
+        );
+
+    CBaseEntity *pOther =
+        gamehelpers->ReferenceToEntity(
+            iSavedActiveWeapon[iClient]
+        );
+
+    if (pOther)
     {
-        CBaseHandle &hndl =
-            *(CBaseHandle *)(
-                (uint8_t *)pPlayer + iActiveWeaponOffset
-            );
-
-        CBaseEntity *pOther =
-            gamehelpers->ReferenceToEntity(
-                iSavedActiveWeapon[iClient]
-            );
-
-        if (pOther)
-        {
-            hndl.Set((IHandleEntity *)pOther);
-        }
+        hndl.Set((IHandleEntity *)pOther);
     }
-
-    /*
-     * Restores the custom arms after the weapon rebuilds
-     * the viewmodel, preventing the default gloves from returning.
-     */
-    const char *model = szPlayerArmsModels[iClient][0]
-        ? szPlayerArmsModels[iClient]
-        : szPlayerArmsModels_Default;
-
-    ke::SafeStrcpy(
-        (char *)((uint8_t *)pPlayer + iArmsModelOffset),
-        ARMS_SZ_LEN,
-        model
-    );
-
-    iSavedActiveWeapon[iClient] = -1;
 }
 
 static void FrameAction_SetClientActiveWeapon_Middle(
@@ -532,7 +533,6 @@ static void FrameAction_SetClientActiveWeapon(
     );
 }
 
-// native bool AF_RequestArmsUpdate(int client, bool force = false);
 cell_t sm_AF_RequestArmsUpdate(
     IPluginContext *pContext,
     const cell_t *params
@@ -607,24 +607,17 @@ cell_t sm_AF_RequestArmsUpdate(
 
     CALL_FWD(iClient, 1);
 
-    const char *model = szPlayerArmsModels[iClient][0]
-        ? szPlayerArmsModels[iClient]
-        : szPlayerArmsModels_Default;
-
     ke::SafeStrcpy(
         (char *)((uint8_t *)pPlayer + iArmsModelOffset),
         ARMS_SZ_LEN,
-        model
+        szPlayerArmsModels[iClient][0]
+            ? szPlayerArmsModels[iClient]
+            : szPlayerArmsModels_Default
     );
 
     return true;
 }
 
-// native void AF_DisableClientArmsUpdate(
-//     int client,
-//     bool disable = true,
-//     bool remove_arms = true
-// );
 cell_t sm_AF_DisableClientArmsUpdate(
     IPluginContext *pContext,
     const cell_t *params
@@ -667,7 +660,6 @@ cell_t sm_AF_DisableClientArmsUpdate(
     return 1;
 }
 
-// native bool AF_IsClientArmsNotUpdating(int client);
 cell_t sm_AF_IsClientArmsNotUpdating(
     IPluginContext *pContext,
     const cell_t *params
@@ -686,10 +678,6 @@ cell_t sm_AF_IsClientArmsNotUpdating(
     return bPlayerDisableArmsUpdate[iClient];
 }
 
-// native bool AF_ForceArmsUpdate(
-//     int client,
-//     bool ignore_blocked = false
-// );
 cell_t sm_AF_ForceArmsUpdate(
     IPluginContext *pContext,
     const cell_t *params
