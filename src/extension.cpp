@@ -460,18 +460,11 @@ cell_t sm_AF_GetDefaultArmsModel(
     return len;
 }
 
-static void FrameAction_SetClientActiveWeapon_End(
-    void *pData
-)
+static void FrameAction_SetClientActiveWeapon_End(void *pData)
 {
     int iClient = (uintptr_t)pData;
 
     if (iClient < 1 || iClient > MaxClients)
-    {
-        return;
-    }
-
-    if (iSavedActiveWeapon[iClient] < 64)
     {
         return;
     }
@@ -484,20 +477,39 @@ static void FrameAction_SetClientActiveWeapon_End(
         return;
     }
 
-    CBaseHandle &hndl =
-        *(CBaseHandle *)(
-            (uint8_t *)pPlayer + iActiveWeaponOffset
-        );
-
-    CBaseEntity *pOther =
-        gamehelpers->ReferenceToEntity(
-            iSavedActiveWeapon[iClient]
-        );
-
-    if (pOther)
+    if (iSavedActiveWeapon[iClient] >= 64)
     {
-        hndl.Set((IHandleEntity *)pOther);
+        CBaseHandle &hndl =
+            *(CBaseHandle *)(
+                (uint8_t *)pPlayer + iActiveWeaponOffset
+            );
+
+        CBaseEntity *pOther =
+            gamehelpers->ReferenceToEntity(
+                iSavedActiveWeapon[iClient]
+            );
+
+        if (pOther)
+        {
+            hndl.Set((IHandleEntity *)pOther);
+        }
     }
+
+    /*
+     * Restores the custom arms after the weapon rebuilds
+     * the viewmodel, preventing the default gloves from returning.
+     */
+    const char *model = szPlayerArmsModels[iClient][0]
+        ? szPlayerArmsModels[iClient]
+        : szPlayerArmsModels_Default;
+
+    ke::SafeStrcpy(
+        (char *)((uint8_t *)pPlayer + iArmsModelOffset),
+        ARMS_SZ_LEN,
+        model
+    );
+
+    iSavedActiveWeapon[iClient] = -1;
 }
 
 static void FrameAction_SetClientActiveWeapon_Middle(
