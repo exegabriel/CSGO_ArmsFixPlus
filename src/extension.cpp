@@ -4,44 +4,62 @@
 #include <IPlayerHelpers.h>
 #include "extension.h"
 
-#define ARMS_ONLY_HANDS "models/weapons/v_models/arms/bare/v_bare_hands.mdl"
-#define IGNORE_ANARCHIST "tm_anarchist"
 #define ARMS_SZ_LEN 192
 #define ARMS_FORCEUPDATE_TIMERDURATION 0.02
 
 #define MaxClients gpGlobals->maxClients
-#define CALL_FWD(A,B) m_pOnArmsUpdated->PushCell(A); \
-                      m_pOnArmsUpdated->PushCell(B); \
-                      m_pOnArmsUpdated->Execute(NULL)
+
+#define CALL_FWD(A, B) \
+    m_pOnArmsUpdated->PushCell(A); \
+    m_pOnArmsUpdated->PushCell(B); \
+    m_pOnArmsUpdated->Execute(NULL)
 
 IGameEventManager2 *gameevents = NULL;
-IForward *m_pOnArmsUpdated;
+IForward *m_pOnArmsUpdated = NULL;
 
 int iSavedActiveWeapon[64 + 1];
-char szPlayerArmsModels_Default[ARMS_SZ_LEN] = ARMS_ONLY_HANDS;
 bool bPlayerDisableArmsUpdate[64 + 1];
+
+char szPlayerArmsModels_Default[ARMS_SZ_LEN] = "";
 char szPlayerArmsModels[64 + 1][ARMS_SZ_LEN];
+
 int iArmsModelOffset = -1;
 int iActiveWeaponOffset = -1;
 
 ArmsFix g_ArmsFix;
 SMEXT_LINK(&g_ArmsFix);
 
-SH_DECL_HOOK2(IVEngineServer, PrecacheModel, SH_NOATTRIB, 0, int, const char *, bool);
-SH_DECL_HOOK3_void(IServerGameDLL, ServerActivate, SH_NOATTRIB, 0, edict_t *, int, int);
+SH_DECL_HOOK2(
+    IVEngineServer,
+    PrecacheModel,
+    SH_NOATTRIB,
+    0,
+    int,
+    const char *,
+    bool
+);
+
+SH_DECL_HOOK3_void(
+    IServerGameDLL,
+    ServerActivate,
+    SH_NOATTRIB,
+    0,
+    edict_t *,
+    int,
+    int
+);
 
 void PrecacheDefaultArms(bool preload = true)
 {
     if (szPlayerArmsModels_Default[0] == '\0')
     {
-        ke::SafeStrcpy(
-            szPlayerArmsModels_Default,
-            ARMS_SZ_LEN,
-            ARMS_ONLY_HANDS
-        );
+        return;
     }
 
-    engine->PrecacheModel(szPlayerArmsModels_Default, preload);
+    engine->PrecacheModel(
+        szPlayerArmsModels_Default,
+        preload
+    );
 }
 
 bool ArmsFix::SDK_OnMetamodLoad(
@@ -96,15 +114,19 @@ void ArmsFix::FireGameEvent(IGameEvent *pEvent)
     }
 
     const char *name = pEvent->GetName();
-    int iClient;
+
+    int iClient = playerhelpers->GetClientOfUserId(
+        pEvent->GetInt("userid")
+    );
+
+    if (iClient <= 0 || iClient > MaxClients)
+    {
+        return;
+    }
 
     if (name[7] == 's')
     {
-        iClient = playerhelpers->GetClientOfUserId(
-            pEvent->GetInt("userid")
-        );
-
-        if (!iClient || bPlayerDisableArmsUpdate[iClient])
+        if (bPlayerDisableArmsUpdate[iClient])
         {
             return;
         }
@@ -117,28 +139,25 @@ void ArmsFix::FireGameEvent(IGameEvent *pEvent)
             return;
         }
 
+        CALL_FWD(iClient, 0);
+
         char *dest =
             (char *)((uint8_t *)pPlayer + iArmsModelOffset);
 
-        CALL_FWD(iClient, 0);
+        if (szPlayerArmsModels[iClient][0])
+        {
+            ke::SafeStrcpy(
+                dest,
+                ARMS_SZ_LEN,
+                szPlayerArmsModels[iClient]
+            );
+        }
+        else
+        {
+            // Empty means: let the game choose the normal player arms.
+            ke::SafeStrcpy(dest, ARMS_SZ_LEN, "");
+        }
 
-        ke::SafeStrcpy(
-            dest,
-            ARMS_SZ_LEN,
-            szPlayerArmsModels[iClient][0]
-                ? szPlayerArmsModels[iClient]
-                : szPlayerArmsModels_Default
-        );
-
-        return;
-    }
-
-    iClient = playerhelpers->GetClientOfUserId(
-        pEvent->GetInt("userid")
-    );
-
-    if (!iClient)
-    {
         return;
     }
 
@@ -147,7 +166,11 @@ void ArmsFix::FireGameEvent(IGameEvent *pEvent)
     iSavedActiveWeapon[iClient] = -1;
 }
 
-bool ArmsFix::SDK_OnLoad(char *error, size_t maxlength, bool late)
+bool ArmsFix::SDK_OnLoad(
+    char *error,
+    size_t maxlength,
+    bool late
+)
 {
     sm_sendprop_info_t info;
 
@@ -199,9 +222,14 @@ bool ArmsFix::SDK_OnLoad(char *error, size_t maxlength, bool late)
     return true;
 }
 
-int ArmsFix::PrecacheModel(const char *model, bool precache)
+int ArmsFix::PrecacheModel(
+    const char *model,
+    bool precache
+)
 {
-    return META_RESULT_ORIG_RET(int);
+    // Do not block glove or arms models.
+    // The engine must execute its original precache flow.
+    RETURN_META_VALUE(MRES_IGNORED, 0);
 }
 
 void ArmsFix::OnServerActivate(
@@ -231,7 +259,12 @@ void ArmsFix::SDK_OnUnload()
         true
     );
 
-    forwards->ReleaseForward(m_pOnArmsUpdated);
+    if (m_pOnArmsUpdated)
+    {
+        forwards->ReleaseForward(m_pOnArmsUpdated);
+        m_pOnArmsUpdated = NULL;
+    }
+
     gameevents->RemoveListener(this);
 }
 
@@ -250,12 +283,18 @@ cell_t sm_AF_SetDefaultArmsModel(
     const cell_t *params
 )
 {
-    static char *szMdlPath;
+    char *szMdlPath;
 
     pContext->LocalToString(
         params[1],
         &szMdlPath
     );
+
+    if (!szMdlPath || !szMdlPath[0])
+    {
+        szPlayerArmsModels_Default[0] = '\0';
+        return 1;
+    }
 
     ke::SafeStrcpy(
         szPlayerArmsModels_Default,
@@ -277,12 +316,7 @@ cell_t sm_AF_ResetDefaultArmsModel(
     const cell_t *params
 )
 {
-    ke::SafeStrcpy(
-        szPlayerArmsModels_Default,
-        ARMS_SZ_LEN,
-        ARMS_ONLY_HANDS
-    );
-
+    szPlayerArmsModels_Default[0] = '\0';
     return 1;
 }
 
@@ -294,7 +328,7 @@ cell_t sm_AF_HasClientCustomArms(
 {
     int iClient = params[1];
 
-    if (iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > MaxClients)
     {
         return pContext->ThrowNativeError(
             "Wrong client index (%d)",
@@ -302,7 +336,7 @@ cell_t sm_AF_HasClientCustomArms(
         );
     }
 
-    return szPlayerArmsModels[iClient][0] ? true : false;
+    return szPlayerArmsModels[iClient][0] != '\0';
 }
 
 // native void AF_SetClientArmsModel(int client, char[] mdl_path);
@@ -313,7 +347,7 @@ cell_t sm_AF_SetClientArmsModel(
 {
     int iClient = params[1];
 
-    if (iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > MaxClients)
     {
         return pContext->ThrowNativeError(
             "Wrong client index (%d)",
@@ -328,18 +362,29 @@ cell_t sm_AF_SetClientArmsModel(
         &szMdlPath
     );
 
+    if (!szMdlPath || !szMdlPath[0])
+    {
+        return pContext->ThrowNativeError(
+            "Arms model path cannot be empty"
+        );
+    }
+
+    /*
+     * The model path comes from eItems/botskins and is specific
+     * to the equipped glove model.
+     */
     engine->PrecacheModel(
         szMdlPath,
         true
     );
-
-    CALL_FWD(iClient, 4);
 
     ke::SafeStrcpy(
         szPlayerArmsModels[iClient],
         ARMS_SZ_LEN,
         szMdlPath
     );
+
+    CALL_FWD(iClient, 4);
 
     return 1;
 }
@@ -352,7 +397,7 @@ cell_t sm_AF_RemoveClientArmsModel(
 {
     int iClient = params[1];
 
-    if (iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > MaxClients)
     {
         return pContext->ThrowNativeError(
             "Wrong client index (%d)",
@@ -373,7 +418,7 @@ cell_t sm_AF_GetClientArmsModel(
 {
     int iClient = params[1];
 
-    if (iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > MaxClients)
     {
         return pContext->ThrowNativeError(
             "Wrong client index (%d)",
@@ -381,25 +426,16 @@ cell_t sm_AF_GetClientArmsModel(
         );
     }
 
-    CBaseEntity *pPlayer =
-        gamehelpers->ReferenceToEntity(iClient);
-
-    if (!pPlayer)
-    {
-        return pContext->ThrowNativeError(
-            "Cannot allocate CBaseEntity pointer of a player (%d)",
-            iClient
-        );
-    }
+    const char *model = szPlayerArmsModels[iClient][0]
+        ? szPlayerArmsModels[iClient]
+        : szPlayerArmsModels_Default;
 
     size_t len;
 
     pContext->StringToLocalUTF8(
         params[2],
         params[3],
-        szPlayerArmsModels[iClient][0]
-            ? szPlayerArmsModels[iClient]
-            : szPlayerArmsModels_Default,
+        model,
         &len
     );
 
@@ -424,9 +460,16 @@ cell_t sm_AF_GetDefaultArmsModel(
     return len;
 }
 
-static void FrameAction_SetClientActiveWeapon_End(void *pData)
+static void FrameAction_SetClientActiveWeapon_End(
+    void *pData
+)
 {
     int iClient = (uintptr_t)pData;
+
+    if (iClient < 1 || iClient > MaxClients)
+    {
+        return;
+    }
 
     if (iSavedActiveWeapon[iClient] < 64)
     {
@@ -457,7 +500,9 @@ static void FrameAction_SetClientActiveWeapon_End(void *pData)
     }
 }
 
-static void FrameAction_SetClientActiveWeapon_Middle(void *pData)
+static void FrameAction_SetClientActiveWeapon_Middle(
+    void *pData
+)
 {
     smutils->AddFrameAction(
         FrameAction_SetClientActiveWeapon_End,
@@ -465,7 +510,9 @@ static void FrameAction_SetClientActiveWeapon_Middle(void *pData)
     );
 }
 
-static void FrameAction_SetClientActiveWeapon(void *pData)
+static void FrameAction_SetClientActiveWeapon(
+    void *pData
+)
 {
     smutils->AddFrameAction(
         FrameAction_SetClientActiveWeapon_Middle,
@@ -481,7 +528,7 @@ cell_t sm_AF_RequestArmsUpdate(
 {
     int iClient = params[1];
 
-    if (iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > MaxClients)
     {
         return pContext->ThrowNativeError(
             "Wrong client index (%d)",
@@ -548,12 +595,14 @@ cell_t sm_AF_RequestArmsUpdate(
 
     CALL_FWD(iClient, 1);
 
+    const char *model = szPlayerArmsModels[iClient][0]
+        ? szPlayerArmsModels[iClient]
+        : szPlayerArmsModels_Default;
+
     ke::SafeStrcpy(
         (char *)((uint8_t *)pPlayer + iArmsModelOffset),
         ARMS_SZ_LEN,
-        szPlayerArmsModels[iClient][0]
-            ? szPlayerArmsModels[iClient]
-            : szPlayerArmsModels_Default
+        model
     );
 
     return true;
@@ -571,7 +620,7 @@ cell_t sm_AF_DisableClientArmsUpdate(
 {
     int iClient = params[1];
 
-    if (iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > MaxClients)
     {
         return pContext->ThrowNativeError(
             "Wrong client index (%d)",
@@ -614,7 +663,7 @@ cell_t sm_AF_IsClientArmsNotUpdating(
 {
     int iClient = params[1];
 
-    if (iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > MaxClients)
     {
         return pContext->ThrowNativeError(
             "Wrong client index (%d)",
@@ -636,7 +685,7 @@ cell_t sm_AF_ForceArmsUpdate(
 {
     int iClient = params[1];
 
-    if (iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > MaxClients)
     {
         return pContext->ThrowNativeError(
             "Wrong client index (%d)",
@@ -717,5 +766,8 @@ const sp_nativeinfo_t NativesList[] =
 
 void ArmsFix::SDK_OnAllLoaded()
 {
-    sharesys->AddNatives(myself, NativesList);
+    sharesys->AddNatives(
+        myself,
+        NativesList
+    );
 }
