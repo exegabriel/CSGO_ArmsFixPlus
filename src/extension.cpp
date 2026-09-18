@@ -5,28 +5,27 @@
 #include "extension.h"
 
 #define ARMS_ONLY_HANDS "models/weapons/v_models/arms/bare/v_bare_hands.mdl"
-#define IGNORE_ANARCHIST "tm_anarchist"
 #define ARMS_SZ_LEN 192
-#define ARMS_FORCEUPDATE_TIMERDURATION 0.02
 
 #define MaxClients gpGlobals->maxClients
-#define CALL_FWD(A,B)	m_pOnArmsUpdated->PushCell(A); \
-            m_pOnArmsUpdated->PushCell(B); \
-            m_pOnArmsUpdated->Execute(NULL)
+#define CALL_FWD(A,B)    m_pOnArmsUpdated->PushCell(A); \
+                        m_pOnArmsUpdated->PushCell(B); \
+                        m_pOnArmsUpdated->Execute(NULL)
 
 // Variables
 IGameEventManager2 *gameevents = NULL;
 IForward *m_pOnArmsUpdated;
 
-int iSavedActiveWeapon[64+1];
+bool bPlayerDisableArmsUpdate[64 + 1];
 char szPlayerArmsModels_Default[ARMS_SZ_LEN] = ARMS_ONLY_HANDS;
-bool bPlayerDisableArmsUpdate[64+1];
-char szPlayerArmsModels[64+1][ARMS_SZ_LEN];
-int iArmsModelOffset = -1, iActiveWeaponOffset = -1;
+char szPlayerArmsModels[64 + 1][ARMS_SZ_LEN];
+
+int iArmsModelOffset = -1;
 
 // SourceMod related
 ArmsFix g_ArmsFix;
 SMEXT_LINK(&g_ArmsFix);
+
 SH_DECL_HOOK2(IVEngineServer, PrecacheModel, SH_NOATTRIB, 0, int, const char *, bool);
 SH_DECL_HOOK3_void(IServerGameDLL, ServerActivate, SH_NOATTRIB, 0, edict_t *, int, int);
 
@@ -62,7 +61,7 @@ void ArmsFix::FireGameEvent(IGameEvent *pEvent)
         return;
 
     const char *name = pEvent->GetName();
-    int iClient;
+    int iClient = 0;
 
     if (name[7] == 's') // player_spawn
     {
@@ -89,25 +88,19 @@ void ArmsFix::FireGameEvent(IGameEvent *pEvent)
 
     szPlayerArmsModels[iClient][0] = '\0';
     bPlayerDisableArmsUpdate[iClient] = false;
-    iSavedActiveWeapon[iClient] = -1;
 }
 
 bool ArmsFix::SDK_OnLoad(char *error, size_t maxlength, bool late)
 {
     sm_sendprop_info_t info;
+
     if (!gamehelpers->FindSendPropInfo("CCSPlayer", "m_szArmsModel", &info))
     {
         Q_snprintf(error, maxlength, "Couldn't find CCSPlayer::m_szArmsModel offset!");
         return false;
     }
-    iArmsModelOffset = info.actual_offset;
 
-    if (!gamehelpers->FindSendPropInfo("CCSPlayer", "m_hActiveWeapon", &info))
-    {
-        Q_snprintf(error, maxlength, "Couldn't find CCSPlayer::m_hActiveWeapon offset!");
-        return false;
-    }
-    iActiveWeaponOffset = info.actual_offset;
+    iArmsModelOffset = info.actual_offset;
 
     m_pOnArmsUpdated = forwards->CreateForward("AF_OnArmsUpdate", ET_Ignore, 2, NULL, Param_Cell, Param_Cell);
 
@@ -117,9 +110,8 @@ bool ArmsFix::SDK_OnLoad(char *error, size_t maxlength, bool late)
 
 int ArmsFix::PrecacheModel(const char *model, bool precache)
 {
-    // O bloqueio agressivo disso causava o late precache do glove arms.
-    // Isso é o que gera o "Late precache of ... glove_fingerless..." e o bug do viewmodel.
-    // Não bloqueie esses modelos deixando o engine precachear no tempo certo.
+    // Resolver o late precache sem interferir no engine.
+    // Não bloqueie glove/arms aqui.
     RETURN_META_VALUE(MRES_IGNORED, 0);
 }
 
@@ -152,6 +144,7 @@ cell_t sm_AF_SetDefaultArmsModel(IPluginContext *pContext, const cell_t *params)
 
     ke::SafeStrcpy(szPlayerArmsModels_Default, ARMS_SZ_LEN, szMdlPath);
     engine->PrecacheModel(szPlayerArmsModels_Default, true);
+
     return 1;
 }
 
@@ -166,7 +159,7 @@ cell_t sm_AF_ResetDefaultArmsModel(IPluginContext *pContext, const cell_t *param
 cell_t sm_AF_HasClientCustomArms(IPluginContext *pContext, const cell_t *params)
 {
     int iClient = params[1];
-    if(iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > 64)
         return pContext->ThrowNativeError("Wrong client index (%d)", iClient);
 
     return szPlayerArmsModels[iClient][0] ? true : false;
@@ -176,13 +169,13 @@ cell_t sm_AF_HasClientCustomArms(IPluginContext *pContext, const cell_t *params)
 cell_t sm_AF_SetClientArmsModel(IPluginContext *pContext, const cell_t *params)
 {
     int iClient = params[1];
-    if(iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > 64)
         return pContext->ThrowNativeError("Wrong client index (%d)", iClient);
 
     char *szMdlPath;
     pContext->LocalToString(params[2], &szMdlPath);
 
-    // Precaching antes de trocar o arms model
+    // Precaching explícito antes do update do viewmodel
     engine->PrecacheModel(szMdlPath, true);
 
     CALL_FWD(iClient, 4);
@@ -203,7 +196,7 @@ cell_t sm_AF_SetClientArmsModel(IPluginContext *pContext, const cell_t *params)
 cell_t sm_AF_RemoveClientArmsModel(IPluginContext *pContext, const cell_t *params)
 {
     int iClient = params[1];
-    if(iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > 64)
         return pContext->ThrowNativeError("Wrong client index (%d)", iClient);
 
     szPlayerArmsModels[iClient][0] = '\0';
@@ -222,12 +215,8 @@ cell_t sm_AF_RemoveClientArmsModel(IPluginContext *pContext, const cell_t *param
 cell_t sm_AF_GetClientArmsModel(IPluginContext *pContext, const cell_t *params)
 {
     int iClient = params[1];
-    if(iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > 64)
         return pContext->ThrowNativeError("Wrong client index (%d)", iClient);
-
-    CBaseEntity *pPlayer = gamehelpers->ReferenceToEntity(iClient);
-    if (!pPlayer)
-        return pContext->ThrowNativeError("Cannot allocate CBaseEntity pointer of a player (%d)", iClient);
 
     size_t len;
     pContext->StringToLocalUTF8(
@@ -248,54 +237,24 @@ cell_t sm_AF_GetDefaultArmsModel(IPluginContext *pContext, const cell_t *params)
     return len;
 }
 
-static void FrameAction_SetClientActiveWeapon_End(void* pData)
-{
-    int iClient = (uintptr_t)pData;
-    if(iSavedActiveWeapon[iClient] < 64)
-        return;
-
-    CBaseEntity *pPlayer = gamehelpers->ReferenceToEntity(iClient);
-    if (!pPlayer)
-        return;
-
-    CBaseHandle &hndl = *(CBaseHandle*)((uint8_t *)pPlayer + iActiveWeaponOffset);
-    CBaseEntity *pOther = gamehelpers->ReferenceToEntity(iSavedActiveWeapon[iClient]);
-    if(pOther)
-        hndl.Set((IHandleEntity*) pOther);
-
-    iSavedActiveWeapon[iClient] = -1;
-}
-
-static void FrameAction_SetClientActiveWeapon_Middle(void* pData)
-{
-    smutils->AddFrameAction(FrameAction_SetClientActiveWeapon_End, pData);
-}
-
-static void FrameAction_SetClientActiveWeapon(void* pData)
-{
-    smutils->AddFrameAction(FrameAction_SetClientActiveWeapon_Middle, pData);
-}
-
 // native bool AF_RequestArmsUpdate(int client, bool force = false);
 cell_t sm_AF_RequestArmsUpdate(IPluginContext *pContext, const cell_t *params)
 {
     int iClient = params[1];
-    if(iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > 64)
         return pContext->ThrowNativeError("Wrong client index (%d)", iClient);
 
     CBaseEntity *pPlayer = gamehelpers->ReferenceToEntity(iClient);
     if (!pPlayer)
         return pContext->ThrowNativeError("Client (%d) is not connected or missing", iClient);
 
-    if(bPlayerDisableArmsUpdate[iClient])
+    if (bPlayerDisableArmsUpdate[iClient])
     {
         CALL_FWD(iClient, 2);
         ke::SafeStrcpy((char *)((uint8_t *)pPlayer + iArmsModelOffset), ARMS_SZ_LEN, "");
         return false;
     }
 
-    // O reset do active weapon em frame é o que mais pode causar flicker/viewmodel glitch.
-    // Não mexer nisso se não for estritamente necessário.
     CALL_FWD(iClient, 1);
 
     const char *armsModel = szPlayerArmsModels[iClient][0] ? szPlayerArmsModels[iClient] : szPlayerArmsModels_Default;
@@ -308,7 +267,7 @@ cell_t sm_AF_RequestArmsUpdate(IPluginContext *pContext, const cell_t *params)
 cell_t sm_AF_DisableClientArmsUpdate(IPluginContext *pContext, const cell_t *params)
 {
     int iClient = params[1];
-    if(iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > 64)
         return pContext->ThrowNativeError("Wrong client index (%d)", iClient);
 
     CBaseEntity *pPlayer = gamehelpers->ReferenceToEntity(iClient);
@@ -316,11 +275,12 @@ cell_t sm_AF_DisableClientArmsUpdate(IPluginContext *pContext, const cell_t *par
         return pContext->ThrowNativeError("Client (%d) is not connected or missing", iClient);
 
     bPlayerDisableArmsUpdate[iClient] = params[2];
-    if(params[2] && params[3])
+    if (params[2] && params[3])
     {
         CALL_FWD(iClient, 3);
         ke::SafeStrcpy((char *)((uint8_t *)pPlayer + iArmsModelOffset), ARMS_SZ_LEN, "");
     }
+
     return 1;
 }
 
@@ -328,7 +288,7 @@ cell_t sm_AF_DisableClientArmsUpdate(IPluginContext *pContext, const cell_t *par
 cell_t sm_AF_IsClientArmsNotUpdating(IPluginContext *pContext, const cell_t *params)
 {
     int iClient = params[1];
-    if(iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > 64)
         return pContext->ThrowNativeError("Wrong client index (%d)", iClient);
 
     return bPlayerDisableArmsUpdate[iClient];
@@ -338,21 +298,19 @@ cell_t sm_AF_IsClientArmsNotUpdating(IPluginContext *pContext, const cell_t *par
 cell_t sm_AF_ForceArmsUpdate(IPluginContext *pContext, const cell_t *params)
 {
     int iClient = params[1];
-    if(iClient < 1 || iClient > 64)
+    if (iClient < 1 || iClient > 64)
         return pContext->ThrowNativeError("Wrong client index (%d)", iClient);
 
-    if(bPlayerDisableArmsUpdate[iClient] && !params[2])
+    if (bPlayerDisableArmsUpdate[iClient] && !params[2])
         return false;
 
     CBaseEntity *pPlayer = gamehelpers->ReferenceToEntity(iClient);
     if (!pPlayer)
         return pContext->ThrowNativeError("Client (%d) is not connected or missing", iClient);
 
-    // A troca sem nullar a arma do cliente foi o que mais gerou flicker.
-    // Se você quiser manter o update em force mode, use apenas o netprop do arms,
-    // e não o hActiveWeapon em frame.
     const char *armsModel = szPlayerArmsModels[iClient][0] ? szPlayerArmsModels[iClient] : szPlayerArmsModels_Default;
     ke::SafeStrcpy((char *)((uint8_t *)pPlayer + iArmsModelOffset), ARMS_SZ_LEN, armsModel);
+
     return true;
 }
 
